@@ -25,13 +25,14 @@ if not (_APP_DIRECTORY / "tercas").is_dir():
 
 from tercas import engine, sections
 from tercas import catalog
+from tercas.orientation import is_girt
 from tercas.presets import PRESETS
 from tercas.project import default_project, import_project_json, project_fingerprint, validate_project
 from tercas.reports import project_json, report_html, report_json
 from tercas.report_docx import report_docx, MIME as DOCX_MIME
 from tercas.visuals import diagram_figure, member_figure, number, section_figure, utilization_figure
 
-st.set_page_config(page_title="Terças | NBR 14762", page_icon=":material/architecture:", layout="wide")
+st.set_page_config(page_title="Terças e travessas | NBR 14762", page_icon=":material/architecture:", layout="wide")
 
 STATUS = {
     "pass": "Calculado · atende",
@@ -46,7 +47,9 @@ RESTRAINTS = {
     "none": "Sem contenção intermediária",
     "discrete": "Contenções discretas",
     "panel": "Painel conectado à mesa",
+    "independent": "Comprimentos distintos Lx, Ly e Lz",
 }
+ELEMENTS = {'roof_purlin': 'Terça de cobertura', 'wall_girt': 'Travessa de fechamento lateral'}
 PLOT_CONFIG = {"displaylogo": False, "scrollZoom": False}
 
 if "project" not in st.session_state:
@@ -54,7 +57,7 @@ if "project" not in st.session_state:
     st.session_state.revision = 0
     st.session_state.result = None
     st.session_state.result_fingerprint = None
-elif st.session_state.project.get("schema_version") in (1, 2, 3, 4):
+elif st.session_state.project.get("schema_version") in (1, 2, 3, 4, 5):
     st.session_state.project = validate_project(st.session_state.project)
     st.session_state.revision += 1
     st.session_state.result = None
@@ -172,8 +175,14 @@ profile, material, member = draft["profile"], draft["material"], draft["member"]
 loads, support, panel, limits = draft["loads"], draft["support"], draft["panel"], draft["limits"]
 tension = draft.setdefault("tension", {"an0_mm2": None, "an_mm2": None, "ct": None})
 
-st.title("Terças de aço formadas a frio")
+st.title("Terças e travessas de aço formadas a frio")
 st.caption("Da seção à memória de cálculo · NBR 14762:2010")
+member['element_type'] = st.segmented_control('Elemento a dimensionar', list(ELEMENTS),
+    format_func=lambda value: ELEMENTS[value], default=member['element_type'], required=True,
+    key=widget_key('member_element_type'), persist_state='session')
+wall = is_girt(member)
+if wall:
+    st.caption('Perfil aberto para baixo, com alma horizontal. Gravidade: flexão menor com alma comprimida (My negativo). Vento horizontal: flexão maior. O motor e as resistências são os mesmos das terças.')
 draft["name"] = st.text_input("Identificação do caso", value=draft["name"], max_chars=160,
                                key=widget_key("name"), placeholder="Ex.: cobertura — eixo 3")
 tab_section, tab_loads, tab_restraints, tab_results = st.tabs(
@@ -181,7 +190,7 @@ tab_section, tab_loads, tab_restraints, tab_results = st.tabs(
 )
 
 props = None
-catalog_entries = catalog.entries()
+catalog_entries = catalog.options()
 catalog_labels = {entry['id']: entry['label'] for entry in catalog_entries}
 current_catalog = catalog.match_profile(profile)
 catalog_ready = current_catalog is not None and abs(material['nu'] - 0.3) < 1e-12
@@ -205,14 +214,31 @@ with tab_section:
                            f"D = {number(profile['d_mm'])} mm · t = {number(profile['t_mm'])} mm · ri = {number(profile['r_mm'])} mm")
                 st.caption('Dimensões externas e espessura do aço base. O raio cadastrado precisa corresponder ao perfil utilizado na obra.')
                 st.caption('Críticos de flexão pré-calculados e documentados. Os dados não são uma certificação de fabricante nem uma transcrição do DimPerfil.')
+                published = current_catalog.get('published')
+                if published:
+                    with st.expander('Valores publicados por Pierin e modelo adotado'):
+                        st.caption(f"Tabela {published['table']} · página {published['printed_page']} do artigo · E = 200.000 MPa · cantos retos.")
+                        names = {'Nl_kN': ('Nℓ', 'kN'), 'Ndist_kN': ('Ndist', 'kN'),
+                                 'Ml_major_kNm': ('Mℓ,x', 'kN·m'), 'Mdist_major_kNm': ('Mdist,x', 'kN·m'),
+                                 'Ml_minor_unspecified_kNm': ('Mℓ,y — sentido não identificado', 'kN·m')}
+                        table([{'Grandeza': label, 'Valor publicado': number(published['critical_values'].get(key), 2), 'Unidade': unit}
+                               for key,(label,unit) in names.items()], 'Valores críticos publicados por Pierin')
+                        st.caption('A análise adotada usa a geometria arredondada cadastrada. Os valores publicados são conservados como referência e não substituem automaticamente críticos de outra geometria ou de outro sentido de flexão.')
+                        if published.get('coated'):
+                            st.caption(f"Perfil zincado: t nominal = {number(published['nominal_thickness_mm'], 3)} mm; a espessura de aço adota desconto total de {number(published['coating_excluded_mm'], 3)} mm como convenção inferida e documentada a partir do revestimento indicado na fonte.")
+                if current_catalog.get('catalog_status') in ('partial','pending'):
+                    st.info('Este perfil está cadastrado, mas algum crítico do modelo arredondado ainda não está validado. O cálculo mostrará os mecanismos que puder concluir e as pendências correspondentes.')
         with st.container(border=True):
-            st.subheader("Vão e inclinação")
+            st.subheader("Vão e orientação")
             c1, c2 = st.columns(2)
             with c1:
                 numeric(member, "L_m", "Vão biapoiado L (m)", "member", minimum=0.1, maximum=100.0, step=0.5)
             with c2:
-                numeric(member, "angle_deg", "Inclinação da cobertura (°)", "member", minimum=-89.0,
-                        maximum=89.0, step=1.0)
+                if wall:
+                    st.metric('Rotação da seção', '90° · abertura para baixo')
+                else:
+                    numeric(member, "angle_deg", "Inclinação da cobertura (°)", "member", minimum=-89.0,
+                            maximum=89.0, step=1.0)
         with st.expander("Aço e propriedades elásticas", expanded=False):
             c1, c2 = st.columns(2)
             with c1:
@@ -237,7 +263,7 @@ with tab_section:
             except ValueError as exc:
                 st.warning(str(exc), title="Confira a geometria")
             if props is not None:
-                st.plotly_chart(section_figure(profile, props), config={**PLOT_CONFIG, "displayModeBar": False},
+                st.plotly_chart(section_figure(profile, props, member=member), config={**PLOT_CONFIG, "displayModeBar": False},
                                 key="section_drawing", alt="Seção com altura, mesas, enrijecedores e eixos locais x e y")
                 st.caption("CG: centro de gravidade · CT: centro de torção. Traço da espessura ampliado para leitura; cotas em mm.")
                 c1, c2 = st.columns(2)
@@ -275,11 +301,11 @@ with tab_loads:
                     help_text="Exclua o peso próprio do perfil, calculado pela geometria. Inclua apenas os demais componentes metálicos.")
             numeric(loads, "g_roof_kNm", "Telha e componentes industrializados (kN/m)", "loads", step=0.05, digits=3)
             numeric(loads, "q_kNm", "Ação variável distribuída Q (kN/m)", "loads", step=0.05, digits=3)
-            st.caption("A gravidade é vertical e será decomposta conforme a inclinação da cobertura.")
+            st.caption('A gravidade é vertical: gera My negativo na travessa aberta para baixo.' if wall else "A gravidade é vertical e será decomposta conforme a inclinação da cobertura.")
         with right, st.container(border=True):
-            st.subheader("Vento normal à cobertura")
-            numeric(loads, "wind_down_kNm", "Pressão — para baixo (kN/m)", "loads", step=0.05, digits=3)
-            numeric(loads, "wind_up_kNm", "Sucção — para cima (kN/m)", "loads", step=0.05, digits=3)
+            st.subheader('Vento perpendicular ao fechamento' if wall else "Vento normal à cobertura")
+            numeric(loads, "wind_down_kNm", 'Pressão horizontal (kN/m)' if wall else "Pressão — para baixo (kN/m)", "loads", step=0.05, digits=3)
+            numeric(loads, "wind_up_kNm", 'Sucção horizontal (kN/m)' if wall else "Sucção — para cima (kN/m)", "loads", step=0.05, digits=3)
             st.caption("Use magnitudes positivas já convertidas pela faixa tributária. O cálculo das pressões de vento não faz parte deste app.")
         with st.expander("Força de manutenção e coeficientes de combinação"):
             c1, c2 = st.columns(2)
@@ -295,18 +321,27 @@ with tab_loads:
                         numeric(loads, f"psi{index}_{suffix}", f"ψ{index} — {suffix.upper()}", "loads", maximum=1.0, step=0.05)
             st.caption("Valores iniciais de Q para cobertura: ψ0 = 0,8; ψ1 = 0,7; ψ2 = 0,6. Confira a categoria da ação. ELS rara usa ψ1 para ações acompanhantes na edição 2010.")
     else:
-        st.info("Os valores abaixo já são totais e concomitantes de cada combinação. Não há nova majoração, decomposição pela inclinação ou adição de peso próprio.")
+        st.info(('Em ELU e ELS, informe componentes totais concomitantes da combinação; em ELS adota-se a rara para o limite paralelo. O vento característico para o limite perpendicular é informado em campos separados abaixo. ' if wall else 'Os valores abaixo já são totais e concomitantes de cada combinação. ')+
+                'Não há nova majoração das cargas distribuídas nem adição de peso próprio.')
         left, right = st.columns(2, gap="large")
         for column, title, prefix, nkey in [(left, "Estado-limite último", "qd", "nsd_kN"),
                                             (right, "Estado-limite de serviço", "qs", "nser_kN")]:
             with column, st.container(border=True):
                 st.subheader(title)
-                numeric(loads, f"{prefix}_normal_kNm", "Carga normal / direção y (kN/m)", "loads",
+                numeric(loads, f"{prefix}_normal_kNm", ('Componente horizontal concomitante qs,y (kN/m)' if prefix=='qs' else 'Vento horizontal de cálculo / y (kN/m)') if wall else "Carga normal / direção y (kN/m)", "loads",
                         minimum=None, step=0.05, digits=3)
-                numeric(loads, f"{prefix}_parallel_kNm", "Carga paralela / direção x (kN/m)", "loads",
+                numeric(loads, f"{prefix}_parallel_kNm", 'Gravidade / direção x, negativa (kN/m)' if wall else "Carga paralela / direção x (kN/m)", "loads",
                         minimum=None, step=0.05, digits=3)
                 numeric(loads, nkey, "Força axial (kN)", "loads", minimum=None, step=1.0, digits=3)
-        st.caption("Normal positiva: gravidade. Normal negativa: sucção. My positivo comprime bordas livres. N positivo: compressão; N negativo: tração.")
+        st.caption(('Na travessa, qd,x negativo representa gravidade; qd,y é vento horizontal. Em ELS, qs,x e qs,y são da mesma combinação rara. ' if wall else 'Normal positiva: gravidade. Normal negativa: sucção. ')+
+                   'My positivo comprime bordas livres; My negativo comprime a alma. N positivo: compressão; N negativo: tração.')
+        if wall:
+            with st.container(border=True):
+                st.subheader('Vento característico isolado — flecha perpendicular ao fechamento')
+                for column,field,label in zip(st.columns(2),('wind_down_kNm','wind_up_kNm'),('Pressão Wk (kN/m)','Sucção Wk (kN/m)')):
+                    with column:
+                        numeric(loads,field,label,'loads',minimum=0.,step=.05,digits=3)
+                st.caption('Magnitudes positivas, sem descontar gravidade. São usadas somente nos casos isolados de ELS; não são adicionadas às cargas de cálculo qd nem à combinação qs.')
         st.warning("A análise com força axial representa uma barra ideal isolada, inicialmente reta. Ela não substitui a análise global do galpão nem a consideração das imperfeições do sistema.")
         with st.expander("Dados para resistência à tração"):
             st.caption("Informe valores obtidos pelo detalhamento real e pelo item 9.6. Sem essas entradas, a resistência final à tração permanece pendente.")
@@ -340,6 +375,12 @@ with tab_restraints:
                 minimum=0.01, step=0.25,
                 help_text="A contenção precisa impedir as duas formas de movimento admitidas no modelo.")
         st.info("Lb altera a estabilidade; o vão principal da flexão e da flecha continua sendo L. Um tirante isolado não comprova automaticamente contenção à torção.")
+    elif member['restraint'] == 'independent':
+        st.caption('Comprimentos entre vínculos efetivos, com K = 1. Um tirante na alma não reduz Lz sem comprovação de impedimento à torção. Os esforços de flexão continuam calculados no vão L.')
+        for column, field, label in zip(st.columns(3), ('Lx_m', 'Ly_m', 'Lz_m'),
+                                        ('Flexão em torno de x — Lx (m)', 'Flexão em torno de y — Ly (m)', 'Torção — Lz (m)')):
+            with column:
+                numeric(member, field, label, 'member', minimum=0.01, step=0.25)
     else:
         if member["Lb_m"] > member["L_m"]:
             member["Lb_m"] = member["L_m"]
@@ -360,7 +401,8 @@ with tab_restraints:
     if member["restraint"] == "panel":
         with st.container(border=True):
             st.subheader("Painel e fixação — Anexo F")
-            st.caption("Para gravidade, a mesa conectada é considerada contida. Para sucção, a mesa tracionada fica ligada ao painel e o Anexo F só pode ser aplicado dentro de seu domínio.")
+            st.caption(('Na travessa, a hipótese se refere aos sentidos de Mx pelo vento: no positivo, a mesa conectada está comprimida; no negativo, está tracionada. A gravidade produz My e não é eliminada pelo painel. ' if wall else 'Para gravidade, a mesa conectada é considerada contida. Para sucção, a mesa tracionada fica ligada ao painel. ')+
+                       'O Anexo F só pode ser aplicado dentro de seu domínio; a presença de flexão biaxial permanece sujeita às condições indicadas nos resultados.')
             c1, c2, c3 = st.columns(3)
             with c1:
                 numeric(panel, "thickness_mm", "Espessura da telha de aço (mm)", "panel", minimum=0.01, step=0.05)
@@ -428,8 +470,9 @@ with tab_restraints:
                     st.warning(f"O projeto antigo contém Mdist,y = {number(member['mdist_minor_kNm'])} kN·m, sem sentido identificado. Esse valor foi preservado no arquivo, mas não é utilizado. Informe os valores corretos nos campos My+ e My−.")
     with st.expander("Limites de deslocamento e outros dados distorcionais"):
         st.caption("Limites na forma L/divisor. Valores mais altos são mais restritivos; confira as exigências da telha e do projeto.")
-        for column, field, label in zip(st.columns(2), ["gravity_L", "uplift_L"],
-                                       ["Gravidade vertical — L /", "Sucção isolada — L /"]):
+        for column, field, label in zip(st.columns(2), ['gravity_L', 'wall_wind_L' if wall else 'uplift_L'],
+                                       ['Paralelo ao fechamento — gravidade L /' if wall else 'Gravidade vertical — L /',
+                                        'Perpendicular ao fechamento — vento isolado L /' if wall else 'Sucção isolada — L /']):
             with column:
                 numeric(limits, field, label, "limits", minimum=1.0, step=10.0, digits=0)
         boolean(limits, 'additional_checks', 'Aplicar também critérios adicionais de flecha normal e paralela', 'limits',
@@ -502,8 +545,9 @@ with tab_results:
                 major = used_catalog['major']
                 table([{
                     'Eixo': 'Maior · Mx±',
-                    'Local (kN·m)': number(major['local_Nmm']/1e6),
-                    'Distorcional (kN·m)': number(major['distortional_Nmm']/1e6) if major['distortional_Nmm'] is not None else 'Não aplicável ao U simples',
+                    'Local (kN·m)': number(major['local_Nmm']/1e6) if major.get('local_Nmm') is not None else 'Não determinado',
+                    'Distorcional (kN·m)': number(major['distortional_Nmm']/1e6) if major.get('distortional_Nmm') is not None else ('Não aplicável ao U simples' if profile['family']=='U' else 'Não determinado'),
+                    'Situação': 'Calculado' if major.get('status')=='computed' else 'Pendente',
                 }], 'Críticos do eixo maior tabulados para o perfil selecionado')
                 st.caption('O crítico local maior do catálogo é referência elástica; a resistência local maior mantém o MSE da NBR. Mdist maior alimenta a verificação distorcional quando necessária.')
         if automatic_minor.get("by_sign"):
@@ -582,7 +626,7 @@ with tab_results:
                     "Limite vertical (mm)": number(item.get("limit_vertical_mm")),
                     "Observação": item.get("note", "")}
                    for item in result.get("service_cases", [])], "Deslocamentos e limites das combinações de serviço")
-            st.caption("δx e δy são componentes locais. Sob gravidade, a verificação vertical é apresentada separadamente; na sucção isolada, aplica-se o critério normal à cobertura.")
+            st.caption('Na travessa, δvertical = −δx (gravidade) e δy é perpendicular ao fechamento (vento). O vento característico é verificado isoladamente nos dois sentidos, conforme A.1, notas c e d.' if wall else "δx e δy são componentes locais. Sob gravidade, a verificação vertical é apresentada separadamente; na sucção isolada, aplica-se o critério normal à cobertura.")
         elif view == "Memória":
             memory = result.get("memory", [])
             query = st.text_input("Filtrar a memória", placeholder="Ex.: flambagem, seção, ELU", key="memory_search")
