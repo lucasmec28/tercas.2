@@ -1,0 +1,24 @@
+TERÇAS — PUBLICAÇÃO SIMPLES
+
+1. Extraia somente Tercas_Publicacao_Simples.zip.
+2. Envie estes quatro arquivos, lado a lado, para a raiz do repositório GitHub:
+   app.py
+   requirements.txt
+   tercas_runtime.zip
+   LEIA_PRIMEIRO.txt
+3. NÃO extraia tercas_runtime.zip. O aplicativo importa o código dentro dele.
+4. No Streamlit Community Cloud, selecione seu repositório, a branch main,
+   o arquivo principal app.py e Python 3.12.
+
+Para corrigir lucasmec28/tercas.2, atualize app.py e requirements.txt e acrescente
+tercas_runtime.zip na raiz. Os módulos antigos soltos não substituem esse ZIP.
+
+Se o repositório já contiver uma pasta tercas, o aplicativo dará preferência a
+ela. Nesse caso, mantenha essa pasta atualizada com o pacote completo, ou use um
+repositório de publicação simples contendo apenas os quatro arquivos acima.
+
+Atualizações: envie app.py, requirements.txt e tercas_runtime.zip sempre juntos,
+obtidos da mesma distribuição. Não instale um pacote chamado tercas pelo pip.
+
+O pacote completo Tercas_Streamlit_GitHub.zip contém o código em pastas, exemplos,
+documentação e testes. O arquivo docs/PUBLICACAO.md explica as duas opções.
