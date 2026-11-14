@@ -24,6 +24,7 @@ if not (_APP_DIRECTORY / "tercas").is_dir():
         st.stop()
 
 from tercas import engine, sections
+from tercas import catalog
 from tercas.presets import PRESETS
 from tercas.project import default_project, import_project_json, project_fingerprint, validate_project
 from tercas.reports import project_json, report_html, report_json
@@ -36,6 +37,8 @@ STATUS = {
     "fail": "Reprovado",
     "pending": "Pendente",
     "not_applicable": "Não aplicável",
+    "excluded": "Excluída por opção de projeto",
+    "partial": "Parcial — escopo adotado",
 }
 RESTRAINTS = {
     "continuous": "Contenção contínua",
@@ -50,7 +53,7 @@ if "project" not in st.session_state:
     st.session_state.revision = 0
     st.session_state.result = None
     st.session_state.result_fingerprint = None
-elif st.session_state.project.get("schema_version") in (1, 2):
+elif st.session_state.project.get("schema_version") in (1, 2, 3, 4):
     st.session_state.project = validate_project(st.session_state.project)
     st.session_state.revision += 1
     st.session_state.result = None
@@ -66,6 +69,28 @@ def replace_project(value: dict) -> None:
     st.session_state.revision += 1
     st.session_state.result = None
     st.session_state.result_fingerprint = None
+
+
+def select_catalog_profile(key: str, identifier: str | None = None) -> None:
+    identifier = identifier if identifier is not None else st.session_state[key]
+    if identifier is None:
+        st.session_state.result = None
+        st.session_state.result_fingerprint = None
+        return
+    entry = catalog.entry_by_id(identifier)
+    value = deepcopy(st.session_state.project)
+    changed = value['profile'] != entry['profile']
+    value['profile'] = deepcopy(entry['profile'])
+    value['material']['nu'] = 0.3
+    value['member']['minor_critical_mode'] = 'automatic'
+    for field in ('ml_minor_pos_kNm', 'ml_minor_neg_kNm', 'mdist_minor_pos_kNm',
+                  'mdist_minor_neg_kNm', 'mdist_major_kNm', 'mdist_minor_kNm'):
+        value['member'][field] = None
+    value['member']['minor_critical_source'] = ''
+    if changed:
+        value['member']['ndist_kN'] = None
+        value['tension'] = dict.fromkeys(('an0_mm2', 'an_mm2', 'ct'), None)
+    replace_project(value)
 
 
 def numeric(target: dict, field: str, label: str, group: str, *, minimum: float | None = 0.0,
@@ -150,30 +175,30 @@ tab_section, tab_loads, tab_restraints, tab_results = st.tabs(
 )
 
 props = None
+catalog_entries = catalog.entries()
+catalog_labels = {entry['id']: entry['label'] for entry in catalog_entries}
+current_catalog = catalog.match_profile(profile)
+catalog_ready = current_catalog is not None and abs(material['nu'] - 0.3) < 1e-12
 with tab_section:
     input_column, drawing_column = st.columns([1.05, 1.25], gap="large")
     with input_column:
         with st.container(border=True):
             st.subheader("Seção transversal")
-            profile["family"] = st.segmented_control(
-                "Família", ["U", "Ue"], format_func=lambda value: "U simples" if value == "U" else "U enrijecido",
-                default=profile["family"], required=True, key=widget_key("family"),
-            )
-            c1, c2 = st.columns(2)
-            with c1:
-                numeric(profile, "h_mm", "Altura externa h (mm)", "profile", minimum=1.0)
-                numeric(profile, "t_mm", "Espessura de aço t (mm)", "profile", minimum=0.1, step=0.1,
-                        help_text="Espessura de cálculo do metal-base, sem revestimento.")
-                if profile["family"] == "Ue":
-                    if profile["d_mm"] <= 0:
-                        profile["d_mm"] = 30.0
-                    numeric(profile, "d_mm", "Enrijecedor D (mm)", "profile", minimum=0.1)
-                else:
-                    profile["d_mm"] = 0.0
-            with c2:
-                numeric(profile, "b_mm", "Largura externa b (mm)", "profile", minimum=1.0)
-                numeric(profile, "r_mm", "Raio interno ri (mm)", "profile", step=0.5)
-            st.caption("Mesas iguais, dobras de 90° e dimensões externas. Os cantos arredondados entram nas propriedades.")
+            ids = list(catalog_labels)
+            selection_key = widget_key('catalog_profile')
+            selected_catalog_id = st.selectbox('Perfil com dados cadastrados', ids,
+                         index=ids.index(current_catalog['id']) if current_catalog is not None else None,
+                         format_func=lambda identifier: catalog_labels[identifier],
+                         placeholder='Selecione um perfil do catálogo',
+                         key=selection_key, on_change=select_catalog_profile, args=(selection_key,), required=True,
+                         help='A seleção carrega dimensões, raio, ν = 0,30 e críticos do catálogo, sem interpolação. Ao trocar de seção, informe novamente as áreas líquidas e Ct da ligação, se houver tração.')
+            if current_catalog is None:
+                st.warning('O perfil deste projeto não consta do catálogo. As entradas foram preservadas; selecione um perfil cadastrado para calcular nesta interface.')
+            else:
+                st.caption(f"{profile['family']} · h = {number(profile['h_mm'])} mm · b = {number(profile['b_mm'])} mm · "
+                           f"D = {number(profile['d_mm'])} mm · t = {number(profile['t_mm'])} mm · ri = {number(profile['r_mm'])} mm")
+                st.caption('Dimensões externas e espessura do aço base. O raio cadastrado precisa corresponder ao perfil utilizado na obra.')
+                st.caption('Críticos de flexão pré-calculados e documentados. Os dados não são uma certificação de fabricante nem uma transcrição do DimPerfil.')
         with st.container(border=True):
             st.subheader("Vão e inclinação")
             c1, c2 = st.columns(2)
@@ -187,7 +212,12 @@ with tab_section:
             with c1:
                 numeric(material, "fy_mpa", "Escoamento fy (MPa)", "material", minimum=1.0, step=10.0, digits=0)
                 numeric(material, "E_mpa", "Módulo E (MPa)", "material", minimum=1.0, step=1000.0, digits=0)
-                numeric(material, "nu", "Coeficiente de Poisson ν", "material", maximum=0.49, step=0.01)
+                st.caption(f"Coeficiente de Poisson do projeto: ν = {number(material['nu'], 2)}. Catálogo calculado com ν = 0,30.")
+                if not catalog_ready and current_catalog is not None:
+                    st.warning('O ν importado difere da base do catálogo. Aplique novamente o perfil para usar ν = 0,30.')
+                    if st.button('Aplicar base elástica do catálogo', key='apply_catalog_material'):
+                        select_catalog_profile(selection_key, current_catalog['id'])
+                        st.rerun()
             with c2:
                 numeric(material, "fu_mpa", "Ruptura fu (MPa)", "material", minimum=1.0, step=10.0, digits=0)
                 numeric(material, "G_mpa", "Módulo G (MPa)", "material", minimum=1.0, step=1000.0, digits=0)
@@ -350,27 +380,39 @@ with tab_restraints:
                 numeric(support, "theta_deg", "Ângulo alma–superfície de apoio (°)", "support", minimum=1.0, maximum=90.0)
             boolean(support, "fastened", "Mesa conectada ao apoio com restrição à rotação", "support")
             st.caption("Modelo de extremidade, uma mesa carregada, alma perpendicular ao apoio (θ = 90°). A verificação da alma não dimensiona os parafusos nem a chapa de apoio.")
+    with st.expander('Escopo adotado para o eixo menor e as flechas', expanded=True):
+        if profile['family']=='Ue':
+            boolean(member, 'exclude_minor_distortion', 'Desconsiderar distorção no eixo menor (My+ e My−)', 'member')
+            if member['exclude_minor_distortion']:
+                st.caption('Exclusão expressa de projeto: a resistência e a rigidez de My usam os ramos global e local. A memória não apresenta essa escolha como dispensa normativa.')
+        boolean(member, 'exclude_minor_shear', 'Desconsiderar cisalhamento no eixo menor (Vx)', 'member')
+        boolean(member, 'deflection_ignore_restraints', 'Desconsiderar contenções intermediárias na avaliação das flechas', 'member')
+        if member['deflection_ignore_restraints']:
+            st.caption(f"Flechas pelo modelo biapoiado no vão integral de {number(member['L_m'])} m. As contenções continuam consideradas na estabilidade ELU.")
     if profile["family"] == "Ue":
         with st.expander("Flexão no eixo menor do Ue — Anexo C", expanded=True):
             member["minor_critical_mode"] = st.segmented_control(
                 "Momentos críticos do eixo menor", ["automatic", "manual"],
-                format_func=lambda value: {"automatic": "Calcular automaticamente", "manual": "Informar valores externos"}[value],
+                format_func=lambda value: {"automatic": "Usar valores do catálogo", "manual": "Informar valores externos"}[value],
                 default=member["minor_critical_mode"], required=True,
                 key=widget_key("member_minor_critical_mode"), persist_state="session")
             if member["minor_critical_mode"] == "automatic":
-                st.caption("Quando houver flexão no eixo menor, o app analisa a estabilidade elástica do perfil para os dois sentidos de My. A geometria, a espessura, E e ν determinam os momentos críticos locais e distorcionais; você não precisa preencher esses valores.")
-                st.info("Os resultados, a origem do método e a conferência de convergência aparecerão na memória. O cálculo considera a seção isolada, sem aproveitar uma restrição local ou distorcional da telha.")
+                st.caption("Os críticos locais e distorcionais de Mx e dos dois sentidos de My são lidos do catálogo para esta geometria. Você não precisa digitá-los. Se E mudar, os críticos são ajustados proporcionalmente; fy entra depois nas resistências.")
+                st.info("A memória identifica o perfil, a análise de referência e a convergência. A análise considera a seção isolada, sem aproveitar restrição local ou distorcional da telha. A opção manual permanece para projetos e exemplos anteriores.")
             else:
-                st.caption("Método da Resistência Direta: o aplicativo calcula Me pelo Anexo E e combina as resistências à flambagem global, local e distorcional. Os valores abaixo são momentos críticos elásticos, sem coeficientes de segurança, de uma análise de estabilidade compatível com esta seção e seus vínculos.")
+                st.caption('O aplicativo calcula Me pelo Anexo E e usa os críticos locais do sentido solicitado. '+
+                           ('O ramo distorcional está excluído por escolha de projeto.' if member['exclude_minor_distortion'] else 'O ramo distorcional também participa da resistência e da rigidez de serviço.'))
                 pos_column, neg_column = st.columns(2)
                 with pos_column:
                     st.markdown("**My positivo — bordas e enrijecedores comprimidos**")
                     numeric(member, "ml_minor_pos_kNm", "Mℓ,y+ local (kN·m)", "member", minimum=0.001, step=0.5, digits=3, optional=True)
-                    numeric(member, "mdist_minor_pos_kNm", "Mdist,y+ distorcional (kN·m)", "member", minimum=0.001, step=0.5, digits=3, optional=True)
+                    if not member['exclude_minor_distortion']:
+                        numeric(member, "mdist_minor_pos_kNm", "Mdist,y+ distorcional (kN·m)", "member", minimum=0.001, step=0.5, digits=3, optional=True)
                 with neg_column:
                     st.markdown("**My negativo — lado da alma comprimido**")
                     numeric(member, "ml_minor_neg_kNm", "Mℓ,y− local (kN·m)", "member", minimum=0.001, step=0.5, digits=3, optional=True)
-                    numeric(member, "mdist_minor_neg_kNm", "Mdist,y− distorcional (kN·m)", "member", minimum=0.001, step=0.5, digits=3, optional=True)
+                    if not member['exclude_minor_distortion']:
+                        numeric(member, "mdist_minor_neg_kNm", "Mdist,y− distorcional (kN·m)", "member", minimum=0.001, step=0.5, digits=3, optional=True)
                 member["minor_critical_source"] = st.text_input(
                     "Origem dos momentos críticos", value=member["minor_critical_source"],
                     max_chars=500, key=widget_key("member_minor_critical_source"),
@@ -380,16 +422,20 @@ with tab_restraints:
                     st.warning(f"O projeto antigo contém Mdist,y = {number(member['mdist_minor_kNm'])} kN·m, sem sentido identificado. Esse valor foi preservado no arquivo, mas não é utilizado. Informe os valores corretos nos campos My+ e My−.")
     with st.expander("Limites de deslocamento e outros dados distorcionais"):
         st.caption("Limites na forma L/divisor. Valores mais altos são mais restritivos; confira as exigências da telha e do projeto.")
-        for column, field, label in zip(st.columns(3), ["gravity_L", "uplift_L", "parallel_L"],
-                                       ["Gravidade — L /", "Sucção — L /", "Paralelo — L /"]):
+        for column, field, label in zip(st.columns(2), ["gravity_L", "uplift_L"],
+                                       ["Gravidade vertical — L /", "Sucção isolada — L /"]):
             with column:
                 numeric(limits, field, label, "limits", minimum=1.0, step=10.0, digits=0)
-        st.markdown("**Valores críticos elásticos distorcionais, quando disponíveis**")
-        st.caption("Informados a partir de uma análise de estabilidade compatível. Deixar em branco não equivale a dispensar a verificação.")
-        for column, field, label in zip(st.columns(2), ["mdist_major_kNm", "ndist_kN"],
-                                       ["Mdist — eixo maior (kN·m)", "Ndist (kN)"]):
-            with column:
-                numeric(member, field, label, "member", minimum=0.001, step=0.5, digits=3, optional=True)
+        boolean(limits, 'additional_checks', 'Aplicar também critérios adicionais de flecha normal e paralela', 'limits',
+                'Desligado: somente as comparações normativas aplicáveis. O L/180 no plano da cobertura não é uma exigência universal da NBR para terças.')
+        if limits['additional_checks']:
+            numeric(limits, 'parallel_L', 'Paralelo — limite adicional L /', 'limits', minimum=1.0, step=10.0, digits=0)
+        if member['minor_critical_mode']=='manual':
+            numeric(member, 'mdist_major_kNm', 'Mdist — eixo maior (kN·m)', 'member', minimum=0.001, step=0.5, digits=3, optional=True)
+        elif profile['family']=='Ue':
+            st.caption('O Mdist do eixo maior é obtido do catálogo na opção automática.')
+        numeric(member, 'ndist_kN', 'Ndist — compressão axial (kN)', 'member', minimum=0.001, step=0.5, digits=3, optional=True,
+                help_text='O catálogo atual é de flexão. A compressão utiliza este dado externo apenas quando a dispensa normativa não é demonstrada.')
 
 st.session_state.project = deepcopy(draft)
 fingerprint = project_fingerprint(draft)
@@ -401,8 +447,8 @@ with project_download:
 
 with tab_results:
     calculate_clicked = st.button("Calcular e verificar", type="primary", icon=":material/calculate:",
-                                   key="calculate", width="stretch")
-    if calculate_clicked:
+                                   key="calculate", width="stretch", disabled=not catalog_ready or selected_catalog_id is None)
+    if calculate_clicked and catalog_ready and selected_catalog_id is not None:
         try:
             with st.spinner("Calculando estabilidade, combinações, resistências e deslocamentos…"):
                 calculated = calculate_cached(draft)
@@ -429,17 +475,31 @@ with tab_results:
             st.error("Um ou mais critérios calculados excedem a resistência ou o limite adotado. Veja os casos governantes abaixo.", title="Há verificações reprovadas")
         elif overall == "pending":
             st.warning("Há verificações aplicáveis sem conclusão. Os itens calculados não representam atendimento completo da barra e de suas ligações.", title="Cálculo concluído com pendências")
+        elif overall == 'partial':
+            st.info('Os critérios calculados atendem ao escopo e às hipóteses adotadas. As condições e eventuais exclusões de projeto estão identificadas abaixo.', title='Cálculo parcial — escopo adotado')
         else:
             st.success("Os critérios implementados e aplicáveis atendem às hipóteses informadas. Consulte a cobertura e o escopo das verificações.", title="Verificações calculadas atendidas")
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Calculadas", sum(check.get("status") in {"pass", "fail"} for check in checks), border=True)
         c2.metric("Reprovadas", len(failed), border=True)
         c3.metric("Pendentes", len(pending), border=True)
         governing = result.get("governing") or {}
-        c4.metric("Utilização governante", number(governing.get("utilization")), border=True)
+        c4.metric('Excluídas', sum(check.get('status')=='excluded' for check in checks), border=True)
+        c5.metric("Utilização governante", number(governing.get("utilization")), border=True)
         if governing:
             st.caption(f"Governante: {governing.get('label', '—')} · {governing.get('case_id', '—')}")
         automatic_minor = result.get("automatic_minor", {})
+        used_catalog = result.get('section_catalog')
+        if used_catalog is not None:
+            with st.expander('Perfil e críticos do catálogo', expanded=True):
+                st.caption(f"{used_catalog['label']} · catálogo {used_catalog['catalog_version']} · E = {number(used_catalog['E_used_mpa'], 0)} MPa")
+                major = used_catalog['major']
+                table([{
+                    'Eixo': 'Maior · Mx±',
+                    'Local (kN·m)': number(major['local_Nmm']/1e6),
+                    'Distorcional (kN·m)': number(major['distortional_Nmm']/1e6) if major['distortional_Nmm'] is not None else 'Não aplicável ao U simples',
+                }], 'Críticos do eixo maior tabulados para o perfil selecionado')
+                st.caption('O crítico local maior do catálogo é referência elástica; a resistência local maior mantém o MSE da NBR. Mdist maior alimenta a verificação distorcional quando necessária.')
         if automatic_minor.get("by_sign"):
             with st.expander("Momentos críticos calculados automaticamente", expanded=True):
                 rows = []
@@ -452,9 +512,12 @@ with tab_results:
                             ("Não aplicável" if data.get("distortion_status") == "not_applicable" else "Não determinado"),
                         "Situação": "Calculado" if data.get("status") == "computed" else "Pendente",
                         "Observação": data.get("note", ""),
+                        "Uso de Mdist": ('Não utilizado — exclusão de projeto' if member['exclude_minor_distortion'] else 'Conforme o estado identificado'),
                     })
                 table(rows, "Momentos críticos locais e distorcionais para os dois sentidos de flexão menor")
                 st.caption(automatic_minor.get("method", "Análise de estabilidade elástica."))
+                if member['exclude_minor_distortion']:
+                    st.caption('Os críticos distorcionais permanecem registrados para consulta; não entram na resistência nem na rigidez de My deste cálculo.')
         if automatic_minor.get("status") == "pending":
             st.warning(automatic_minor.get("note", "O cálculo automático não concluiu todos os críticos necessários. Consulte a memória."))
         limitations = result.get("limitations", [])
@@ -477,7 +540,7 @@ with tab_results:
                 st.plotly_chart(figure, key="utilization_plot", config=PLOT_CONFIG,
                                 alt="Maiores utilizações calculadas em comparação com o limite um")
             table([{"Verificação": item.get("label"), "Caso": item.get("case_id"),
-                    "Estado": STATUS.get(item.get("status"), "Pendente"),
+                    "Estado": ('Atende ao escopo adotado' if item.get('conditional') and item.get('status')=='pass' else STATUS.get(item.get("status"), "Pendente")),
                     "Solicitação": number(item.get("demand")), "Resistência / limite": number(item.get("capacity")),
                     "Unidade": item.get("unit", ""), "Utilização": number(item.get("utilization")),
                     "Referência": item.get("reference", ""), "Observação": item.get("note", "")}
@@ -503,7 +566,7 @@ with tab_results:
                     st.caption("z começa no apoio esquerdo. As curvas conservam os sinais do caso; Mx/My e Vx/Vy são componentes distintas. Não combine máximos de posições diferentes como um par concomitante exato.")
                 else:
                     st.info("Esta grandeza não está disponível para o caso selecionado. Consulte a memória e as pendências.")
-            table([{"Caso": item.get("label", item.get("id")), "Estado": STATUS.get(item.get("status"), "Pendente"),
+            table([{"Caso": item.get("label", item.get("id")), "Estado": ('Atende ao escopo adotado' if item.get('conditional') and item.get('status')=='pass' else STATUS.get(item.get("status"), "Pendente")),
                     "δx (mm)": number(item.get("dx_mm")), "Limite x (mm)": number(item.get("limit_x_mm")),
                     "δy (mm)": number(item.get("dy_mm")), "Limite y (mm)": number(item.get("limit_y_mm")),
                     "δ vertical (mm)": number(item.get("dvertical_mm")),
