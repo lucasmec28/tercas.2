@@ -28,6 +28,7 @@ from tercas import catalog
 from tercas.presets import PRESETS
 from tercas.project import default_project, import_project_json, project_fingerprint, validate_project
 from tercas.reports import project_json, report_html, report_json
+from tercas.report_docx import report_docx, MIME as DOCX_MIME
 from tercas.visuals import diagram_figure, member_figure, number, section_figure, utilization_figure
 
 st.set_page_config(page_title="Terças | NBR 14762", page_icon=":material/architecture:", layout="wide")
@@ -134,6 +135,11 @@ def calculate_cached(value: dict) -> dict:
 @st.cache_data(max_entries=4, show_spinner=False, scope="session")
 def html_cached(value: dict) -> str:
     return report_html(value)
+
+
+@st.cache_data(max_entries=4, show_spinner=False, scope="session")
+def docx_cached(value: dict) -> bytes:
+    return report_docx(value)
 
 
 with st.sidebar:
@@ -528,6 +534,9 @@ with tab_results:
                     if item.get("reference"):
                         st.caption(item["reference"])
         with st.container(horizontal=True):
+            st.download_button("Memória Word", docx_cached(result), file_name=f"{filename}_memoria.docx",
+                               mime=DOCX_MIME, icon=":material/description:", key="download_docx", on_click="ignore",
+                               help="Memória compacta e editável: Times New Roman 12, tabelas 10, sem estilos de título.")
             st.download_button("Memória HTML", html_cached(result), file_name=f"{filename}_memoria.html",
                                mime="text/html", icon=":material/description:", key="download_html", on_click="ignore")
             st.download_button("Resultado JSON", report_json(result), file_name=f"{filename}_resultado.json",
